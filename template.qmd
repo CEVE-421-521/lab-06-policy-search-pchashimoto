@@ -1,6 +1,6 @@
 ---
 title: "Lab 6: Policy Search"
-author: "Your Name (netID)"
+author: "Patricia Hashimoto (pch3)"
 jupyter: julia-1.10
 date: 2024-03-01
 week: 7
@@ -48,10 +48,161 @@ using Random
 using Unitful
 
 Plots.default(; margin=5Plots.mm)
+
+Random.seed!(2024)
+```
+
+Generate SOWs:
+
+```{julia}
+# | output: false
+slr_scenarios = let
+    df = CSV.read("data/slr_oddo.csv", DataFrame)
+    [Oddo17SLR(a, b, c, tstar, cstar) for (a, b, c, tstar, cstar) in eachrow(df)]
+end
+
+
+house = let
+    haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+    desc = "two story, no basement, Contents"
+    source = "USACE - Galveston"
+    row = @rsubset(haz_fl_dept, :Description == desc, :Source == source)[1, :] # select the row I want
+    area = 1726u"ft^2"
+    height_above_gauge = 6u"ft"
+    House(
+        row;
+        area=area,
+        height_above_gauge=height_above_gauge,
+        value_usd=331_000)
+end
+
+p = ModelParams(; house=house, years=2024:2083)
+
+function draw_surge_distribution()
+    μ = rand(Normal(5, 1))
+    σ = rand(Exponential(1.5))
+    ξ = rand(Normal(0.1, 0.05))
+    return GeneralizedExtremeValue(μ, σ, ξ)
+end
+function draw_discount_rate()
+    return 0.0
+end
+
+N_SOW = 100_000
+sows = [
+    SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for
+    _ in 1:N_SOW
+]
+
 ```
 
 ```{julia}
-function objective_function(a::AbstractFloat)
-    return true # PLACEHOLDER
+using Random
+using HouseElevation
+
+# Define the objective function
+function objective_function(elevation::Float64, sows)
+
+    # Initialize variable to store sum of expected values
+    sum_expected_values = 0.0
+    
+    # Run simulation for each SOW and calculate expected value
+    for sow in sows
+        expected_value = run_sim(Action(elevation), sow, p)
+        sum_expected_values += expected_value
+    end
+    
+    # Return the negative of the sum of expected values
+    return -sum_expected_values
 end
+
+# Define model parameters
+p = ModelParams(house=house, years=2024:2083)
+
+# Test the objective function with a few different elevations
+elevations_to_test = [3.0, 5.0, 7.0, 10.0, 12.0, 14.0]  # Example elevations to test
+for elevation in elevations_to_test
+    println("Objective value at elevation $elevation ft: ", objective_function(elevation, sows, 10))
+end
+
+# Run optimization to find optimal elevation
+options = Options(; time_limit=10.0)
+algorithm = ECA(; options=options)
+elevation_bounds = boxconstraints(; lb=0.0, ub=14.0)
+
+# optimize elevation as the only decision variable
+result = optimize(x -> objective_function(x[1], sows[1:10]), elevation_bounds, algorithm)
+
+# View the minimum of the objective function
+println("Minimum objective value: ", minimum(result))
+
+# View the elevation that achieves the minimum objective value
+println("Optimal elevation: ", minimizer(result))
+
 ```
+
+```{julia}
+minimizer(optimize(x -> objective_function(x[1], sows, 1), elevation_bounds, algorithm))
+```
+
+```{julia}
+
+# Generate the range of elevations from 0 to 14 ft
+elevations = range(0.0, stop=14.0, length=1000)
+
+# Calculate the objective function values for each elevation
+objective_values = [objective_function(elevation, sows[1:100]) for elevation in elevations]
+
+# Plot the objective function
+plot(elevations, objective_values, xlabel="Elevation (ft)", ylabel="Objective Function Value",
+     title="Objective Function vs. Elevation",
+     xlims=(0, 14))
+
+     min_value = minimum(objective_values)
+min_index = argmin(objective_values)
+
+println("Minimum value:", min_value)
+println("Elevation with minimum value:", elevations[min_index])
+```
+
+Using the first 10 randomly generated SOWs provides an optimal elevation of about 12.383ft, while the brute force methodwith a resolution of 1000 elevations considered between 0 and 14 ft provides 12.3884ft as the optimal elevation.
+
+
+Next, the objective function is optimized using different numbers of SOWs.
+
+```{julia}
+result1 = optimize(x -> objective_function(x[1], sows[1:100]), elevation_bounds, algorithm)
+
+println("Optimal elevation using 100 SOWS: ", minimizer(result1))
+
+result2 = optimize(x -> objective_function(x[1], sows[1:10_000]), elevation_bounds, algorithm)
+
+println("Optimal elevation using 10,000 SOWS: ", minimizer(result2))
+
+result3 = optimize(x -> objective_function(x[1], sows[1:100_000]), elevation_bounds, algorithm)
+
+println("Optimal elevation using 100,000 SOWS: ", minimizer(result3))
+```
+
+It appears that increasing the number of random SOWs considered is not changing the optimal elevation outcome.
+
+
+1. Set your random seed to 2024 so that you always get the same answers when you re-run your code.
+1. Generate `N_SOW = 100_000` sows at random as in the previous lab and/or as in the template code provided above.
+1. Pick the first `N_SOW_opt = 10` of these sows to use for optimization. You can (and should!!) increase this number once you have a working solution, but we'll use just a few to make sure everything is working.
+1. Define an objective function that takes in a single number as an input (the elevation of the house in feet) and returns one objective function  (the net present value of the house for that elevation).
+    1. Convert the input scalar to an `Action`
+    1. Call `run_sim` on each of the `N_SOW_opt` sows and the elevation to get the expected value of the objective function.
+    1. Return the negative of the sum of these expected values (since we are minimizing).
+1. Test your objective function with a few different elevations to make sure it's working.
+1. Run the optimization with the objective function and see what elevation it recommends.
+1. Validate the result by plotting the objective function for a range of elevations (from 0 to 14 ft) using all your SOWs. Is the recommended elevation the minimum? (We're lucky that in this problem we can compare our optimization solution to a brute-force approach!) If it doesn't seem to be the minimum:
+    1. try increasing `N_SOW_opt` and see if the result changes.
+    1. check whether the optimization algorithm is converging
+
+1. How are we framing this problem? What are the decision variables, the objective function, and the states of the world over which we optimize?
+    The only decision variable here is the elevation to raise the house to. The objective function calculates net present value of elevating the house to a given height, considering both the cost of raising the house and the discounted expected costs of future flood damage. The states of the world considered include sea level rise outcome randomly selected from a set of possible outcomes, a generalized extreme value distribution approximating possible storm surge events, and discount rate.
+1. Digging deeper, we are averaging the objective function computed over a finite number of states of the world. This assumes that they are all drawn from a distribution representing the "true" distribution of states of the world. Is this a good assumption?
+    This assumption might be "good enough" depending on the range of options in the SOWs capturing uncertainty. In this case, using a generalize extreme values distribution is probably not a very good assumption to capture possible storm surge events.
+1. What's not being considered in this analysis that might be important?
+    The discount rate used was 0, which is not capturing possible events that could change the value of raising the house now versus in the future. A more sophisticated analysis might take into account factors that affect the cost of raising the house at different times as well as additional flood-influencing factors besides sea level rise and storm surge distribution, such as changes in land use.
